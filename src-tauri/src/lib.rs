@@ -1,7 +1,6 @@
 use std::net::{TcpStream, ToSocketAddrs};
 use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
-use tauri::Manager;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ServerConfig {
@@ -51,10 +50,14 @@ fn stop_vpn_tunnel() -> Result<bool, String> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .setup(|app| {
-            if let Some(window) = app.get_webview_window("main") {
-                if let Some(icon) = app.default_window_icon() {
-                    let _ = window.set_icon(icon.clone());
+        .setup(|_app| {
+            #[cfg(desktop)]
+            {
+                use tauri::Manager;
+                if let Some(window) = _app.get_webview_window("main") {
+                    if let Some(icon) = _app.default_window_icon() {
+                        let _ = window.set_icon(icon.clone());
+                    }
                 }
             }
             Ok(())
