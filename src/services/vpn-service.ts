@@ -63,8 +63,7 @@ export const VpnService = {
             const latency = await invoke<number>("ping_tcp", { host, port })
             return latency
         } catch {
-            // Em caso de falha ou modo web preview, fallback de medição
-            return Math.floor(Math.random() * 40) + 15
+            return null
         }
     },
 

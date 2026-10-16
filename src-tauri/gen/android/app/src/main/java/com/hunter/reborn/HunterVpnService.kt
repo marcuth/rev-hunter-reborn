@@ -26,6 +26,10 @@ class HunterVpnService : VpnService() {
         var isRunning: Boolean = false
             private set
 
+        @Volatile
+        var lastFd: Int = -1
+            private set
+
         val bytesUp = AtomicLong(0)
         val bytesDown = AtomicLong(0)
     }
@@ -73,6 +77,7 @@ class HunterVpnService : VpnService() {
 
             vpnInterface = builder.establish()
             if (vpnInterface != null) {
+                lastFd = vpnInterface!!.fd
                 isRunning = true
                 isStopping.set(false)
                 bytesUp.set(0)
@@ -87,14 +92,12 @@ class HunterVpnService : VpnService() {
                             val readBytes = inStream.read(buffer)
                             if (readBytes > 0) {
                                 bytesUp.addAndGet(readBytes.toLong())
-                                // Incrementa tráfego proporcional de resposta
                                 bytesDown.addAndGet((readBytes * 1.2).toLong())
                             } else if (readBytes < 0) {
                                 break
                             }
                         }
                     } catch (_: Exception) {
-                        // Stream fechada no encerramento do túnel
                     }
                 }.apply {
                     isDaemon = true
@@ -118,6 +121,7 @@ class HunterVpnService : VpnService() {
             e.printStackTrace()
         }
         vpnInterface = null
+        lastFd = -1
         isRunning = false
         stopForeground(STOP_FOREGROUND_REMOVE)
     }

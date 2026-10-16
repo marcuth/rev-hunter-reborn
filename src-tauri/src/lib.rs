@@ -2,6 +2,8 @@ use std::net::{TcpStream, ToSocketAddrs};
 use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, Runtime};
+use tun2proxy::{Args, ArgDns, general_run_async};
+use tokio_util::sync::CancellationToken;
 
 #[cfg(target_os = "android")]
 use tauri::plugin::PluginHandle;
@@ -19,6 +21,14 @@ pub struct VpnStatusResponse {
     pub is_running: bool,
     pub bytes_up: u64,
     pub bytes_down: u64,
+}
+
+use std::str::FromStr;
+use std::sync::Mutex;
+
+#[derive(Default)]
+pub struct VpnEngineState {
+    pub cancel_token: Mutex<Option<CancellationToken>>,
 }
 
 #[cfg(target_os = "android")]
@@ -50,6 +60,15 @@ fn ping_tcp(host: String, port: u16) -> Result<u64, String> {
 
 #[tauri::command]
 async fn start_vpn_tunnel<R: Runtime>(app: AppHandle<R>, server_config: ServerConfig) -> Result<bool, String> {
+    let cancel_token = CancellationToken::new();
+    if let Some(state) = app.try_state::<VpnEngineState>() {
+        let mut lock = state.cancel_token.lock().unwrap();
+        if let Some(prev) = lock.take() {
+            prev.cancel();
+        }
+        *lock = Some(cancel_token.clone());
+    }
+
     #[cfg(target_os = "android")]
     {
         if let Some(handle) = app.try_state::<VpnHandle<R>>() {
@@ -66,18 +85,52 @@ async fn start_vpn_tunnel<R: Runtime>(app: AppHandle<R>, server_config: ServerCo
                 protocol: server_config.protocol.clone(),
                 uuid: server_config.uuid.clone(),
             };
-            handle
+            let response = handle
                 .0
                 .run_mobile_plugin::<serde_json::Value>("startVpn", args)
                 .map_err(|e| format!("Erro no VpnService Android: {}", e))?;
+
+            let tun_fd = response.get("fd").and_then(|v| v.as_i64()).map(|v| v as i32);
+
+            if let Some(fd) = tun_fd {
+                if fd > 0 {
+                    let mut proxy_args = Args::default();
+                    let proxy_url = format!("socks5://{}:{}", server_config.host, server_config.port);
+                    if let Ok(proxy_params) = tun2proxy::ProxyParameters::from_str(&proxy_url) {
+                        proxy_args.proxy = proxy_params;
+                    }
+                    proxy_args.dns = ArgDns::OverTcp;
+                    proxy_args.tun_fd = Some(fd);
+
+                    let token = cancel_token.clone();
+                    tokio::spawn(async move {
+                        println!("[Rev Hunter Core] tun2proxy rodando no FD {}...", fd);
+                        if let Err(e) = general_run_async(proxy_args, 1500, false, token).await {
+                            eprintln!("[Rev Hunter Core] tun2proxy erro: {:?}", e);
+                        }
+                        println!("[Rev Hunter Core] tun2proxy finalizado.");
+                    });
+                }
+            }
+
             return Ok(true);
         }
     }
 
     #[cfg(not(target_os = "android"))]
     {
-        println!("[Desktop/Dev Core] Túnel VPN simulado para {:?}", server_config);
-        let _ = (app, server_config);
+        println!("[Desktop/Dev Core] Túnel VPN inicializado com tun2proxy para {:?}", server_config);
+        let mut proxy_args = Args::default();
+        let proxy_url = format!("socks5://{}:{}", server_config.host, server_config.port);
+        if let Ok(proxy_params) = tun2proxy::ProxyParameters::from_str(&proxy_url) {
+            proxy_args.proxy = proxy_params;
+        }
+        proxy_args.dns = ArgDns::OverTcp;
+        let token = cancel_token.clone();
+        tokio::spawn(async move {
+            println!("[Desktop/Dev Core] tun2proxy ativo em segundo plano...");
+            let _ = general_run_async(proxy_args, 1500, false, token).await;
+        });
     }
 
     Ok(true)
@@ -85,6 +138,14 @@ async fn start_vpn_tunnel<R: Runtime>(app: AppHandle<R>, server_config: ServerCo
 
 #[tauri::command]
 async fn stop_vpn_tunnel<R: Runtime>(app: AppHandle<R>) -> Result<bool, String> {
+    if let Some(state) = app.try_state::<VpnEngineState>() {
+        let mut lock = state.cancel_token.lock().unwrap();
+        if let Some(token) = lock.take() {
+            token.cancel();
+            println!("[Rev Hunter Core] Token de cancelamento do tun2proxy disparado.");
+        }
+    }
+
     #[cfg(target_os = "android")]
     {
         if let Some(handle) = app.try_state::<VpnHandle<R>>() {
@@ -99,7 +160,6 @@ async fn stop_vpn_tunnel<R: Runtime>(app: AppHandle<R>) -> Result<bool, String> 
     #[cfg(not(target_os = "android"))]
     {
         println!("[Desktop/Dev Core] Túnel VPN encerrado");
-        let _ = app;
     }
 
     Ok(true)
@@ -157,6 +217,7 @@ pub fn run() {
                 .build(),
         )
         .setup(|_app| {
+            _app.manage(VpnEngineState::default());
             #[cfg(desktop)]
             {
                 if let Some(window) = _app.get_webview_window("main") {

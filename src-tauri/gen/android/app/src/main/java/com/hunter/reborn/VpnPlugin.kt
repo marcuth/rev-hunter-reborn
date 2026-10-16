@@ -43,9 +43,11 @@ class VpnPlugin(private val activity: Activity) : Plugin(activity) {
         } else {
             // Permissão já concedida pelo usuário previamente
             launchVpnService(host, port, protocol)
+            Thread.sleep(150)
             val res = JSObject()
             res.put("success", true)
             res.put("status", "connected")
+            res.put("fd", HunterVpnService.lastFd)
             invoke.resolve(res)
         }
     }
@@ -54,9 +56,11 @@ class VpnPlugin(private val activity: Activity) : Plugin(activity) {
     fun onVpnPrepared(invoke: Invoke, result: ActivityResult) {
         if (result.resultCode == Activity.RESULT_OK) {
             launchVpnService(pendingHost, pendingPort, pendingProtocol)
+            Thread.sleep(150)
             val res = JSObject()
             res.put("success", true)
             res.put("status", "connected")
+            res.put("fd", HunterVpnService.lastFd)
             invoke.resolve(res)
         } else {
             invoke.reject("Permissão de VPN recusada pelo usuário.")
@@ -69,9 +73,11 @@ class VpnPlugin(private val activity: Activity) : Plugin(activity) {
 
         if (result?.resultCode == Activity.RESULT_OK) {
             launchVpnService(pendingHost, pendingPort, pendingProtocol)
+            Thread.sleep(150)
             val res = JSObject()
             res.put("success", true)
             res.put("status", "connected")
+            res.put("fd", HunterVpnService.lastFd)
             currentInvoke.resolve(res)
         } else {
             currentInvoke.reject("Permissão de VPN recusada pelo usuário.")

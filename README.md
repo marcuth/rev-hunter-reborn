@@ -31,7 +31,8 @@ O **Rev Hunter Reborn** foi projetado com o *"espírito de mod"* sobre a engenha
 | **Login Google** | Obrigatório em diversos fluxos | **Desnecessário / Totalmente Local** |
 | **Tamanho do App** | ~150 MB (APK inchado com SDKs) | **Ultra-leve (~15 MB no Android)** |
 | **Servidores** | Fixos do provedor com restrições | **Híbrido: Presets + Subscrições VLESS / JSON** |
-| **Ping & Latência** | Checagem básica | **TCP Ping Nativo em Rust com auto-sort** |
+| **Ping & Latência** | Checagem básica | **TCP Ping Nativo em Rust com auto-sort real** |
+| **VPN Engine** | libtun2socks nativo fechado | **Android VpnService nativo + motor Rust tun2proxy** |
 
 ---
 
@@ -41,22 +42,24 @@ O **Rev Hunter Reborn** foi projetado com o *"espírito de mod"* sobre a engenha
 graph TD
     subgraph Frontend [React 19 + Shadcn/UI + Tailwind 4]
         UI[Painel Mobile-First] --> Drawer[Seletor de Modos / Servidores]
-        UI --> Stats[Telemetria de Tráfego em Tempo Real]
+        UI --> Stats[Telemetria Real de Tráfego TUN]
         UI --> SubModal[Importador de Subscrição / JSON]
     end
 
-    subgraph Core [Backend Rust - Tauri v2]
+    subgraph Core [Backend Rust - Tauri v2 + Tokio]
         TauriIPC[Tauri IPC / Handlers] --> Ping[TCP Handshake Direto com Host:Porta]
-        TauriIPC --> Tunnel[Gerenciador do Ciclo de Conexão]
+        TauriIPC --> TunnelState[VpnEngineState & CancellationToken]
+        TunnelState --> Tun2Proxy[Motor tun2proxy (camada 3 -> SOCKS5/HTTP)]
     end
 
-    subgraph Network [Camada de Rede]
-        Tunnel --> Engine[Túnel VLESS / Xray / SOCKS5]
-        Engine <--> RemoteServer[Servidor VPS / Nós Remotos]
+    subgraph Android [Camada Nativa Android]
+        TauriIPC <-->|Plugin IPC| VpnPlugin[VpnPlugin.kt (VpnService.prepare)]
+        VpnPlugin --> SystemDialog[Diálogo Nativo de Permissão do OS]
+        VpnPlugin --> VpnService[HunterVpnService.kt (tun0 + Foreground Notification)]
+        VpnService -->|tun_fd| Tun2Proxy
     end
 
-    Drawer <-->|invoke: ping_tcp| TauriIPC
-    Stats <-->|invoke: stats| TauriIPC
+    Tun2Proxy <--> RemoteServer[Servidor Proxy / Nós Remotos]
 ```
 
 ---

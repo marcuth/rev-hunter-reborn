@@ -60,13 +60,6 @@ export function App() {
                         downSpeed = `${(deltaDown / 1024 / timeDiff).toFixed(1)} KB/s`
                         totalUpMb = `${(liveStatus.bytesUp / (1024 * 1024)).toFixed(2)} MB`
                         totalDownMb = `${(liveStatus.bytesDown / (1024 * 1024)).toFixed(2)} MB`
-                    } else {
-                        const simUp = (Math.random() * 140 + 30).toFixed(1)
-                        const simDown = (Math.random() * 850 + 200).toFixed(1)
-                        upSpeed = `${simUp} KB/s`
-                        downSpeed = `${simDown} KB/s`
-                        totalUpMb = `${(addedSec * 0.12).toFixed(1)} MB`
-                        totalDownMb = `${(addedSec * 0.85).toFixed(1)} MB`
                     }
 
                     return {
