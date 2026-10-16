@@ -6,10 +6,19 @@ import android.net.VpnService
 import androidx.activity.result.ActivityResult
 import app.tauri.annotation.ActivityCallback
 import app.tauri.annotation.Command
+import app.tauri.annotation.InvokeArg
 import app.tauri.annotation.TauriPlugin
 import app.tauri.plugin.Invoke
 import app.tauri.plugin.JSObject
 import app.tauri.plugin.Plugin
+
+@InvokeArg
+class StartVpnArgs {
+    var host: String = "br1.vless-node.net"
+    var port: Int = 443
+    var protocol: String = "vless"
+    var uuid: String? = null
+}
 
 @TauriPlugin
 class VpnPlugin(private val activity: Activity) : Plugin(activity) {
@@ -21,9 +30,14 @@ class VpnPlugin(private val activity: Activity) : Plugin(activity) {
 
     @Command
     fun startVpn(invoke: Invoke) {
-        val host = invoke.getString("host") ?: "br1.vless-node.net"
-        val port = invoke.getInt("port") ?: 443
-        val protocol = invoke.getString("protocol") ?: "vless"
+        val args = try {
+            invoke.parseArgs(StartVpnArgs::class.java)
+        } catch (_: Exception) {
+            StartVpnArgs()
+        }
+        val host = args.host
+        val port = args.port
+        val protocol = args.protocol
 
         pendingHost = host
         pendingPort = port
