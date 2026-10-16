@@ -11,7 +11,7 @@ node_modules
 dist
 dist-ssr
 *.local
-
+STATUS_VPN.md
 # Tauri & Rust
 src-tauri/target
 src-tauri/gen/schemas

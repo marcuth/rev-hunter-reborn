@@ -19,6 +19,8 @@ class StartVpnArgs {
     var port: Int = 443
     var protocol: String = "vless"
     var uuid: String? = null
+    var user: String? = null
+    var pass: String? = null
 }
 
 @TauriPlugin
@@ -28,6 +30,8 @@ class VpnPlugin(private val activity: Activity) : Plugin(activity) {
     private var pendingHost: String = ""
     private var pendingPort: Int = 443
     private var pendingProtocol: String = "vless"
+    private var pendingUser: String? = null
+    private var pendingPass: String? = null
 
     // Launcher AndroidX correto para receber o resultado do diálogo de permissão VPN
     private val vpnPermissionLauncher: ActivityResultLauncher<Intent> =
@@ -49,10 +53,14 @@ class VpnPlugin(private val activity: Activity) : Plugin(activity) {
         val host = args.host
         val port = args.port
         val protocol = args.protocol
+        val user = args.user
+        val pass = args.pass
 
         pendingHost = host
         pendingPort = port
         pendingProtocol = protocol
+        pendingUser = user
+        pendingPass = pass
 
         val prepareIntent = VpnService.prepare(activity)
         if (prepareIntent != null) {
@@ -63,7 +71,7 @@ class VpnPlugin(private val activity: Activity) : Plugin(activity) {
             }
         } else {
             // Permissão já concedida anteriormente — inicia o serviço diretamente
-            launchVpnService(host, port, protocol)
+            launchVpnService(host, port, protocol, user, pass)
             resolveVpnStarted(invoke)
         }
     }
@@ -73,7 +81,7 @@ class VpnPlugin(private val activity: Activity) : Plugin(activity) {
         pendingInvoke = null
 
         if (result.resultCode == Activity.RESULT_OK) {
-            launchVpnService(pendingHost, pendingPort, pendingProtocol)
+            launchVpnService(pendingHost, pendingPort, pendingProtocol, pendingUser, pendingPass)
             resolveVpnStarted(currentInvoke)
         } else {
             currentInvoke.reject("Permissão de VPN recusada pelo usuário.")
@@ -120,12 +128,14 @@ class VpnPlugin(private val activity: Activity) : Plugin(activity) {
         invoke.resolve(res)
     }
 
-    private fun launchVpnService(host: String, port: Int, protocol: String) {
+    private fun launchVpnService(host: String, port: Int, protocol: String, user: String? = null, pass: String? = null) {
         val intent = Intent(activity, HunterVpnService::class.java).apply {
             action = HunterVpnService.ACTION_CONNECT
             putExtra("host", host)
             putExtra("port", port)
             putExtra("protocol", protocol)
+            if (!user.isNullOrEmpty()) putExtra("user", user)
+            if (!pass.isNullOrEmpty()) putExtra("pass", pass)
         }
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
             activity.startForegroundService(intent)

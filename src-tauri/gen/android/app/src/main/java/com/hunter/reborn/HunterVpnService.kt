@@ -160,6 +160,116 @@ class LocalSocks5Forwarder(
     }
 }
 
+class RevHunterFilterInputStream(
+    private val underlying: InputStream,
+    private val leftover: ByteArray = ByteArray(0)
+) : InputStream() {
+    private var headerStripped = false
+    private var buffer = ByteArray(0)
+    private var bufferIndex = 0
+
+    init {
+        if (leftover.isNotEmpty()) {
+            buffer = leftover
+        }
+    }
+
+    private fun stripRevHunterHeader() {
+        if (headerStripped) return
+        val byteList = ArrayList<Byte>()
+        for (i in bufferIndex until buffer.size) {
+            byteList.add(buffer[i])
+        }
+        buffer = ByteArray(0)
+        bufferIndex = 0
+
+        fun findDoubleCrlf(list: List<Byte>): Int {
+            for (i in 0 until list.size - 3) {
+                if (list[i] == '\r'.code.toByte() &&
+                    list[i + 1] == '\n'.code.toByte() &&
+                    list[i + 2] == '\r'.code.toByte() &&
+                    list[i + 3] == '\n'.code.toByte()
+                ) {
+                    return i + 4
+                }
+            }
+            return -1
+        }
+
+        var idx = findDoubleCrlf(byteList)
+        val temp = ByteArray(1024)
+        while (idx == -1) {
+            val r = underlying.read(temp)
+            if (r == -1) break
+            for (i in 0 until r) {
+                byteList.add(temp[i])
+            }
+            idx = findDoubleCrlf(byteList)
+        }
+
+        if (idx != -1) {
+            val remaining = ByteArray(byteList.size - idx)
+            for (i in idx until byteList.size) {
+                remaining[i - idx] = byteList[i]
+            }
+            buffer = remaining
+            bufferIndex = 0
+            val headerBytes = ByteArray(idx)
+            for (i in 0 until idx) {
+                headerBytes[i] = byteList[i]
+            }
+            Log.i("RevHunterFilter", "Consumiu cabeçalho intermediário: ${String(headerBytes, Charsets.UTF_8).take(60)}")
+        } else {
+            buffer = byteList.toByteArray()
+            bufferIndex = 0
+        }
+        headerStripped = true
+    }
+
+    override fun read(): Int {
+        if (!headerStripped) {
+            stripRevHunterHeader()
+        }
+        if (bufferIndex < buffer.size) {
+            return buffer[bufferIndex++].toInt() and 0xFF
+        }
+        return underlying.read()
+    }
+
+    override fun read(b: ByteArray, off: Int, len: Int): Int {
+        if (!headerStripped) {
+            stripRevHunterHeader()
+        }
+        if (bufferIndex < buffer.size) {
+            val available = buffer.size - bufferIndex
+            val toCopy = Math.min(available, len)
+            System.arraycopy(buffer, bufferIndex, b, off, toCopy)
+            bufferIndex += toCopy
+            return toCopy
+        }
+        return underlying.read(b, off, len)
+    }
+
+    override fun close() {
+        underlying.close()
+    }
+}
+
+class FilteredSocket(
+    private val delegate: Socket,
+    val filterIn: InputStream
+) : Socket() {
+    override fun getInputStream(): InputStream = filterIn
+    override fun getOutputStream(): OutputStream = delegate.getOutputStream()
+    override fun close() = delegate.close()
+    override fun isConnected(): Boolean = delegate.isConnected
+    override fun isClosed(): Boolean = delegate.isClosed
+    override fun setSoTimeout(timeout: Int) { delegate.soTimeout = timeout }
+    override fun getSoTimeout(): Int = delegate.soTimeout
+    override fun setTcpNoDelay(on: Boolean) { delegate.tcpNoDelay = on }
+    override fun getTcpNoDelay(): Boolean = delegate.tcpNoDelay
+}
+
 class HunterSocketFactory(
     private val vpnService: VpnService,
     private val isWebSocket: Boolean
@@ -177,8 +287,59 @@ class HunterSocketFactory(
     }
 
     override fun createSocket(host: String, port: Int): Socket {
-        if (port == 443 && !isWebSocket) {
-            // Porta 443: SSH direto sobre TLS (Stunnel) com SNI e certificados aceitos
+        val isRevHunterHost = host.contains("rvpronext.online")
+        if (isRevHunterHost || isWebSocket || port == 80) {
+            // Rota oficial: Conexão na Cloudflare CDN porta 80 com upgrade WebSocket
+            val rawSocket = Socket()
+            vpnService.protect(rawSocket)
+            val cfIp = "172.67.69.209" // Anycast Cloudflare CDN do Rev Hunter
+            Log.i("HunterSocketFactory", "Conectando ao CDN Cloudflare ($cfIp:80) com Host: $host...")
+            rawSocket.connect(InetSocketAddress(cfIp, 80), 10000)
+
+            val out = rawSocket.getOutputStream()
+            val req = "GET / HTTP/1.1\r\nHost: $host\r\nConnection: Upgrade\r\nUpgrade: Websocket\r\n\r\n"
+            out.write(req.toByteArray(Charsets.UTF_8))
+            out.flush()
+
+            // Lê a resposta HTTP 101 Switching Protocols da Cloudflare
+            val `in` = rawSocket.getInputStream()
+            val buffer = ByteArray(4096)
+            val received = ArrayList<Byte>()
+            var doubleCrlfIdx = -1
+
+            while (doubleCrlfIdx == -1) {
+                val r = `in`.read(buffer)
+                if (r == -1) break
+                for (i in 0 until r) {
+                    received.add(buffer[i])
+                }
+                for (i in 0 until received.size - 3) {
+                    if (received[i] == '\r'.code.toByte() &&
+                        received[i + 1] == '\n'.code.toByte() &&
+                        received[i + 2] == '\r'.code.toByte() &&
+                        received[i + 3] == '\n'.code.toByte()
+                    ) {
+                        doubleCrlfIdx = i + 4
+                        break
+                    }
+                }
+            }
+
+            val leftover = if (doubleCrlfIdx != -1 && doubleCrlfIdx < received.size) {
+                val rem = ByteArray(received.size - doubleCrlfIdx)
+                for (i in doubleCrlfIdx until received.size) {
+                    rem[i - doubleCrlfIdx] = received[i]
+                }
+                rem
+            } else {
+                ByteArray(0)
+            }
+
+            Log.i("HunterSocketFactory", "Handshake HTTP 101 concluído. Encapsulando socket com filtro 200 REVHUNTER.")
+            val filterIn = RevHunterFilterInputStream(`in`, leftover)
+            return FilteredSocket(rawSocket, filterIn)
+        } else if (port == 443) {
+            // Porta 443 direta com SNI e TLS
             val rawSocket = Socket()
             vpnService.protect(rawSocket)
             rawSocket.connect(InetSocketAddress(host, port), 10000)
@@ -192,35 +353,14 @@ class HunterSocketFactory(
             val rawSocket = Socket()
             vpnService.protect(rawSocket)
             rawSocket.connect(InetSocketAddress(host, port), 10000)
-
-            if (isWebSocket || port == 80) {
-                val out = rawSocket.getOutputStream()
-                val req = "GET / HTTP/1.1\r\nHost: $host\r\nConnection: Upgrade\r\nUpgrade: Websocket\r\n\r\n"
-                out.write(req.toByteArray(Charsets.UTF_8))
-                out.flush()
-
-                val `in` = rawSocket.getInputStream()
-                val sb = StringBuilder()
-                var bytesRead = 0
-                while (bytesRead < 4096) {
-                    val b = `in`.read()
-                    if (b == -1) break
-                    sb.append(b.toChar())
-                    bytesRead++
-                    if (sb.contains("200 REVHUNTER\r\n") && sb.endsWith("\r\n\r\n")) {
-                        break
-                    } else if (sb.contains("101") && sb.endsWith("\r\n\r\n") && !sb.contains("REVHUNTER")) {
-                        break
-                    }
-                }
-                Log.i("HunterSocketFactory", "WebSocket handshake concluído: ${sb.take(80)}")
-            }
-
             return rawSocket
         }
     }
 
     override fun getInputStream(socket: Socket): InputStream {
+        if (socket is FilteredSocket) {
+            return socket.filterIn
+        }
         return socket.getInputStream()
     }
 
@@ -270,6 +410,20 @@ class HunterVpnService : VpnService() {
         createNotificationChannel()
     }
 
+    private fun decryptAesIfNeeded(value: String): String {
+        if (value == "gp45ndonr" || value == "ueuf49gpv" || value.length < 16) return value
+        try {
+            val keySpec = javax.crypto.spec.SecretKeySpec("abcdefghijklmnop".toByteArray(Charsets.UTF_8), "AES")
+            val cipher = javax.crypto.Cipher.getInstance("AES/ECB/PKCS5Padding")
+            cipher.init(javax.crypto.Cipher.DECRYPT_MODE, keySpec)
+            val decoded = android.util.Base64.decode(value, android.util.Base64.DEFAULT)
+            val decrypted = cipher.doFinal(decoded)
+            return String(decrypted, Charsets.UTF_8).trim()
+        } catch (_: Exception) {
+            return value
+        }
+    }
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_DISCONNECT -> {
@@ -280,13 +434,17 @@ class HunterVpnService : VpnService() {
                 val host = intent?.getStringExtra("host") ?: "servidor01.rvpronext.online"
                 val port = intent?.getIntExtra("port", 80) ?: 80
                 val protocol = intent?.getStringExtra("protocol") ?: "ssh"
-                connect(host, port, protocol)
+                val rawUser = intent?.getStringExtra("user") ?: "gp45ndonr"
+                val rawPass = intent?.getStringExtra("pass") ?: "ueuf49gpv"
+                val finalUser = decryptAesIfNeeded(rawUser)
+                val finalPass = decryptAesIfNeeded(rawPass)
+                connect(host, port, protocol, finalUser, finalPass)
             }
         }
         return START_NOT_STICKY
     }
 
-    private fun connect(host: String, port: Int, protocol: String) {
+    private fun connect(host: String, port: Int, protocol: String, user: String = "gp45ndonr", pass: String = "ueuf49gpv") {
         if (isRunning) return
 
         try {
@@ -304,7 +462,7 @@ class HunterVpnService : VpnService() {
         Thread {
             try {
                 // 1. Inicializa o cliente SSH e o Dynamic Port Forwarding SOCKS5 na porta 1080
-                Log.i(TAG, "Iniciando túnel SSH com JSch para $host:$port...")
+                Log.i(TAG, "Iniciando túnel SSH com JSch para $host:$port com usuário '$user'...")
                 val jsch = JSch()
                 
                 // Carrega chave RSA desprotegida (sem necessidade de AES-128-CBC)
@@ -317,14 +475,15 @@ class HunterVpnService : VpnService() {
                     Log.w(TAG, "Aviso ao carregar chave RSA no JSch: ${e.message}")
                 }
 
-                val session = jsch.getSession("gp45ndonr", host, port)
-                session.setPassword("ueuf49gpv")
+                val session = jsch.getSession(user, host, port)
+                session.setPassword(pass)
                 session.setConfig("StrictHostKeyChecking", "no")
                 session.setConfig("server_host_key", "ssh-ed25519,ecdsa-sha2-nistp256,ecdsa-sha2-nistp384,ecdsa-sha2-nistp521,rsa-sha2-512,rsa-sha2-256")
                 session.setConfig("PreferredAuthentications", "publickey,password,keyboard-interactive")
+                session.setConfig("PubkeyAcceptedAlgorithms", "rsa-sha2-512,rsa-sha2-256,ssh-rsa")
                 session.timeout = 15000
 
-                val isWs = (port == 80)
+                val isWs = (port == 80 || host.contains("rvpronext.online"))
                 session.setSocketFactory(HunterSocketFactory(this, isWs))
 
                 try {

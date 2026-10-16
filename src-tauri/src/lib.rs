@@ -14,6 +14,8 @@ pub struct ServerConfig {
     pub port: u16,
     pub protocol: String,
     pub uuid: Option<String>,
+    pub user: Option<String>,
+    pub pass: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -82,12 +84,16 @@ async fn start_vpn_tunnel<R: Runtime>(app: AppHandle<R>, server_config: ServerCo
                 port: u16,
                 protocol: String,
                 uuid: Option<String>,
+                user: Option<String>,
+                pass: Option<String>,
             }
             let args = AndroidStartArgs {
                 host: server_config.host.clone(),
                 port: server_config.port,
                 protocol: server_config.protocol.clone(),
                 uuid: server_config.uuid.clone(),
+                user: server_config.user.clone(),
+                pass: server_config.pass.clone(),
             };
             let response = handle
                 .0
