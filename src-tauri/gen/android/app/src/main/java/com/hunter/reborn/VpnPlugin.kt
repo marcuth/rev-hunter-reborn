@@ -57,12 +57,7 @@ class VpnPlugin(private val activity: Activity) : Plugin(activity) {
         } else {
             // Permissão já concedida pelo usuário previamente
             launchVpnService(host, port, protocol)
-            Thread.sleep(150)
-            val res = JSObject()
-            res.put("success", true)
-            res.put("status", "connected")
-            res.put("fd", HunterVpnService.lastFd)
-            invoke.resolve(res)
+            resolveVpnStarted(invoke)
         }
     }
 
@@ -70,12 +65,7 @@ class VpnPlugin(private val activity: Activity) : Plugin(activity) {
     fun onVpnPrepared(invoke: Invoke, result: ActivityResult) {
         if (result.resultCode == Activity.RESULT_OK) {
             launchVpnService(pendingHost, pendingPort, pendingProtocol)
-            Thread.sleep(150)
-            val res = JSObject()
-            res.put("success", true)
-            res.put("status", "connected")
-            res.put("fd", HunterVpnService.lastFd)
-            invoke.resolve(res)
+            resolveVpnStarted(invoke)
         } else {
             invoke.reject("Permissão de VPN recusada pelo usuário.")
         }
@@ -87,15 +77,24 @@ class VpnPlugin(private val activity: Activity) : Plugin(activity) {
 
         if (result?.resultCode == Activity.RESULT_OK) {
             launchVpnService(pendingHost, pendingPort, pendingProtocol)
-            Thread.sleep(150)
-            val res = JSObject()
-            res.put("success", true)
-            res.put("status", "connected")
-            res.put("fd", HunterVpnService.lastFd)
-            currentInvoke.resolve(res)
+            resolveVpnStarted(currentInvoke)
         } else {
             currentInvoke.reject("Permissão de VPN recusada pelo usuário.")
         }
+    }
+
+    private fun resolveVpnStarted(invoke: Invoke) {
+        var waited = 0
+        while (HunterVpnService.lastFd <= 0 && waited < 1500) {
+            Thread.sleep(50)
+            waited += 50
+        }
+        val res = JSObject()
+        val fd = HunterVpnService.lastFd
+        res.put("success", fd > 0)
+        res.put("status", if (fd > 0) "connected" else "failed")
+        res.put("fd", fd)
+        invoke.resolve(res)
     }
 
     @Command

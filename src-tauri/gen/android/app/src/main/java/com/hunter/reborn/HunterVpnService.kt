@@ -6,17 +6,20 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
+import android.util.Log
 import androidx.core.app.NotificationCompat
-import java.io.FileInputStream
+import androidx.core.app.ServiceCompat
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
 class HunterVpnService : VpnService() {
 
     companion object {
+        private const val TAG = "HunterVpnService"
         const val ACTION_CONNECT = "com.hunter.reborn.ACTION_CONNECT"
         const val ACTION_DISCONNECT = "com.hunter.reborn.ACTION_DISCONNECT"
         private const val CHANNEL_ID = "HunterVpnChannel"
@@ -36,7 +39,6 @@ class HunterVpnService : VpnService() {
 
     private var vpnInterface: ParcelFileDescriptor? = null
     private val isStopping = AtomicBoolean(false)
-    private var tunnelThread: Thread? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -62,7 +64,17 @@ class HunterVpnService : VpnService() {
     private fun connect(host: String, port: Int, protocol: String) {
         if (isRunning) return
 
-        startForeground(NOTIFICATION_ID, buildNotification("Rev Hunter VPN Conectado", "Servidor: $host:$port ($protocol)"))
+        try {
+            val notification = buildNotification("Rev Hunter VPN Conectado", "Servidor: $host:$port ($protocol)")
+            val fgsType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+            } else {
+                0
+            }
+            ServiceCompat.startForeground(this, NOTIFICATION_ID, notification, fgsType)
+        } catch (e: Throwable) {
+            Log.e(TAG, "Falha ao iniciar startForeground", e)
+        }
 
         try {
             val builder = Builder().apply {
@@ -73,6 +85,11 @@ class HunterVpnService : VpnService() {
                 addDnsServer("8.8.8.8")
                 setMtu(1500)
                 setBlocking(false)
+                try {
+                    addDisallowedApplication(packageName)
+                } catch (e: Exception) {
+                    Log.w(TAG, "Não foi possível desabilitar o próprio app do túnel VPN", e)
+                }
             }
 
             vpnInterface = builder.establish()
@@ -82,48 +99,32 @@ class HunterVpnService : VpnService() {
                 isStopping.set(false)
                 bytesUp.set(0)
                 bytesDown.set(0)
-
-                tunnelThread = Thread {
-                    val pfd = vpnInterface ?: return@Thread
-                    try {
-                        val inStream = FileInputStream(pfd.fileDescriptor)
-                        val buffer = ByteArray(32768)
-                        while (!isStopping.get()) {
-                            val readBytes = inStream.read(buffer)
-                            if (readBytes > 0) {
-                                bytesUp.addAndGet(readBytes.toLong())
-                                bytesDown.addAndGet((readBytes * 1.2).toLong())
-                            } else if (readBytes < 0) {
-                                break
-                            }
-                        }
-                    } catch (_: Exception) {
-                    }
-                }.apply {
-                    isDaemon = true
-                    start()
-                }
+                Log.i(TAG, "Interface TUN criada com sucesso no FD: $lastFd")
+            } else {
+                Log.e(TAG, "builder.establish() retornou null")
+                disconnect()
             }
         } catch (e: Exception) {
-            e.printStackTrace()
+            Log.e(TAG, "Erro ao estabelecer túnel VPN", e)
             disconnect()
         }
     }
 
     private fun disconnect() {
         isStopping.set(true)
-        tunnelThread?.interrupt()
-        tunnelThread = null
-
         try {
             vpnInterface?.close()
         } catch (e: Exception) {
-            e.printStackTrace()
+            Log.e(TAG, "Erro ao fechar vpnInterface", e)
         }
         vpnInterface = null
         lastFd = -1
         isRunning = false
-        stopForeground(STOP_FOREGROUND_REMOVE)
+        try {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+        } catch (e: Throwable) {
+            Log.e(TAG, "Erro ao parar stopForeground", e)
+        }
     }
 
     override fun onDestroy() {

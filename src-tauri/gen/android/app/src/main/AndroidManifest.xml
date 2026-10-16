@@ -17,7 +17,11 @@
         <service
             android:name=".HunterVpnService"
             android:permission="android.permission.BIND_VPN_SERVICE"
-            android:exported="true">
+            android:foregroundServiceType="specialUse"
+            android:exported="false">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="VPN tunnel service" />
             <intent-filter>
                 <action android:name="android.net.VpnService" />
             </intent-filter>

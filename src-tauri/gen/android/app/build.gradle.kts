@@ -21,9 +21,22 @@ android {
         manifestPlaceholders["usesCleartextTraffic"] = "false"
         applicationId = "com.hunter.reborn"
         minSdk = 24
-        targetSdk = 37
+        targetSdk = 34
         versionCode = tauriProperties.getProperty("tauri.android.versionCode", "1").toInt()
         versionName = tauriProperties.getProperty("tauri.android.versionName", "1.0")
+    }
+    signingConfigs {
+        create("release") {
+            val ksFile = rootProject.file("hunter-release.keystore")
+            if (ksFile.exists()) {
+                storeFile = ksFile
+                storePassword = "hunter123"
+                keyAlias = "hunter"
+                keyPassword = "hunter123"
+                enableV1Signing = true
+                enableV2Signing = true
+            }
+        }
     }
     buildTypes {
         getByName("debug") {
@@ -39,6 +52,10 @@ android {
             }
         }
         getByName("release") {
+            val ksFile = rootProject.file("hunter-release.keystore")
+            if (ksFile.exists()) {
+                signingConfig = signingConfigs.getByName("release")
+            }
             optimization {
                enable = true
             }

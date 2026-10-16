@@ -20,6 +20,9 @@ target
 .gradle_home
 **/build/
 **/.gradle/
+*.apk
+*.idsig
+*.keystore
 
 # Editor directories and files
 .vscode/*
