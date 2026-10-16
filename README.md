@@ -49,13 +49,13 @@ graph TD
     subgraph Core [Backend Rust - Tauri v2 + Tokio]
         TauriIPC[Tauri IPC / Handlers] --> Ping[TCP Handshake Direto com Host:Porta]
         TauriIPC --> TunnelState[VpnEngineState & CancellationToken]
-        TunnelState --> Tun2Proxy[Motor tun2proxy (camada 3 -> SOCKS5/HTTP)]
+        TunnelState --> Tun2Proxy["Motor tun2proxy (camada 3 -> SOCKS5/HTTP)"]
     end
 
     subgraph Android [Camada Nativa Android]
-        TauriIPC <-->|Plugin IPC| VpnPlugin[VpnPlugin.kt (VpnService.prepare)]
+        TauriIPC <-->|Plugin IPC| VpnPlugin["VpnPlugin.kt (VpnService.prepare)"]
         VpnPlugin --> SystemDialog[Diálogo Nativo de Permissão do OS]
-        VpnPlugin --> VpnService[HunterVpnService.kt (tun0 + Foreground Notification)]
+        VpnPlugin --> VpnService["HunterVpnService.kt (tun0 + Foreground Notification)"]
         VpnService -->|tun_fd| Tun2Proxy
     end
 
