@@ -100,7 +100,9 @@ export const VpnService = {
                 host: server.host,
                 port: server.port,
                 protocol: server.protocol,
-                uuid: server.uuid
+                uuid: server.uuid,
+                user: server.user,
+                pass: server.pass
             }
         })
     },

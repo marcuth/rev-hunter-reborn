@@ -18,6 +18,16 @@
 
 ---
 
+> [!WARNING]
+> ### ⚠️ Status do Projeto: Em Desenvolvimento / Prova de Conceito
+> **Este mod AINDA NÃO ESTÁ FUNCIONANDO para navegação nos servidores oficiais da Rev Hunter.**  
+> Embora as camadas de transporte (Cloudflare Anycast, handshake WebSocket HTTP 101, filtro do cabeçalho intermediário `200 REVHUNTER`, troca de chaves SSH `ssh-ed25519` e decodificação das credenciais via AES) tenham sido 100% resolvidas e implementadas, o servidor remoto rejeita a autenticação SSH final sem a prévia autorização/registro da sessão.
+> 
+> 📖 **Para desenvolvedores que desejam continuar o projeto:**  
+> Consulte o [**Relatório Técnico Completo de Engenharia Reversa (RELATORIO_TECNICO.md)**](RELATORIO_TECNICO.md) contendo toda a arquitetura descoberta, chaves criptográficas, rotinas descompiladas e os próximos passos para finalizar o cliente.
+
+---
+
 ## ⚡ Visão Geral
 
 O **Rev Hunter Reborn** foi projetado com o *"espírito de mod"* sobre a engenharia reversa do app original: mantém a identidade visual marcante (Cyber Dark Purple) e a compatibilidade com o protocolo **V2Ray / VLESS**, mas elimina completamente todas as barreiras e limitações impostas pela versão comercial.
