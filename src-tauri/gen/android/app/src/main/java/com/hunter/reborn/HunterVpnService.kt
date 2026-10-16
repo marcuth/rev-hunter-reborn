@@ -25,8 +25,12 @@ import java.net.ServerSocket
 import java.net.Socket
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
+import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLSocket
 import javax.net.ssl.SSLSocketFactory
+import javax.net.ssl.TrustManager
+import javax.net.ssl.X509TrustManager
+import java.security.cert.X509Certificate
 
 class LocalSocks5Forwarder(
     private val session: Session,
@@ -159,14 +163,25 @@ class HunterSocketFactory(
     private val isWebSocket: Boolean
 ) : SocketFactory {
 
+    private fun getTrustAllSSLSocketFactory(): SSLSocketFactory {
+        val trustAllCerts = arrayOf<TrustManager>(object : X509TrustManager {
+            override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
+            override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
+            override fun getAcceptedIssuers(): Array<X509Certificate> = arrayOf()
+        })
+        val sslContext = SSLContext.getInstance("TLS")
+        sslContext.init(null, trustAllCerts, java.security.SecureRandom())
+        return sslContext.socketFactory
+    }
+
     override fun createSocket(host: String, port: Int): Socket {
         if (port == 443 && !isWebSocket) {
-            // Porta 443: SSH direto sobre TLS (Stunnel) com SNI
+            // Porta 443: SSH direto sobre TLS (Stunnel) com SNI e certificados aceitos
             val rawSocket = Socket()
             vpnService.protect(rawSocket)
             rawSocket.connect(InetSocketAddress(host, port), 10000)
 
-            val sslFactory = SSLSocketFactory.getDefault() as SSLSocketFactory
+            val sslFactory = getTrustAllSSLSocketFactory()
             val sslSocket = sslFactory.createSocket(rawSocket, host, port, true) as SSLSocket
             sslSocket.startHandshake()
             Log.i("HunterSocketFactory", "Túnel TLS estabelecido na porta 443 com SNI ($host)")
