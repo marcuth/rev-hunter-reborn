@@ -60,7 +60,9 @@ jobs:
 
       - name: Build Android APK
         run: |
-          npx tauri android init --ci
+          if [ ! -d "src-tauri/gen/android" ]; then
+            npx tauri android init --ci
+          fi
           npx tauri android build --apk
 
       - name: Find and Copy APK

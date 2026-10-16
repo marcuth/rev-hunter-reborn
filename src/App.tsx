@@ -28,24 +28,52 @@ export function App() {
         currentPingMs: null
     })
 
-    // Timer de conexão e simulação de telemetria de rede ativa
+    // Timer de conexão e telemetria de rede (TUN nativo Android / Desktop fallback)
     React.useEffect(() => {
         let interval: ReturnType<typeof setInterval> | null = null
 
         if (status === "connected") {
-            interval = setInterval(() => {
+            let lastBytesUp = 0
+            let lastBytesDown = 0
+            let lastTime = Date.now()
+
+            interval = setInterval(async () => {
+                const liveStatus = await VpnService.getVpnStatus()
+                const now = Date.now()
+                const timeDiff = Math.max((now - lastTime) / 1000, 1)
+                lastTime = now
+
                 setStats((prev) => {
-                    const upSpeed = (Math.random() * 240 + 50).toFixed(1)
-                    const downSpeed = (Math.random() * 1400 + 400).toFixed(1)
                     const addedSec = prev.durationSeconds + 1
-                    const totalUpMb = ((addedSec * 0.12)).toFixed(1)
-                    const totalDownMb = ((addedSec * 0.85)).toFixed(1)
+                    let upSpeed = "0.0 KB/s"
+                    let downSpeed = "0.0 KB/s"
+                    let totalUpMb = prev.totalUpload
+                    let totalDownMb = prev.totalDownload
+
+                    if (liveStatus.bytesUp > 0 || liveStatus.bytesDown > 0) {
+                        const deltaUp = Math.max(liveStatus.bytesUp - lastBytesUp, 0)
+                        const deltaDown = Math.max(liveStatus.bytesDown - lastBytesDown, 0)
+                        lastBytesUp = liveStatus.bytesUp
+                        lastBytesDown = liveStatus.bytesDown
+
+                        upSpeed = `${(deltaUp / 1024 / timeDiff).toFixed(1)} KB/s`
+                        downSpeed = `${(deltaDown / 1024 / timeDiff).toFixed(1)} KB/s`
+                        totalUpMb = `${(liveStatus.bytesUp / (1024 * 1024)).toFixed(2)} MB`
+                        totalDownMb = `${(liveStatus.bytesDown / (1024 * 1024)).toFixed(2)} MB`
+                    } else {
+                        const simUp = (Math.random() * 140 + 30).toFixed(1)
+                        const simDown = (Math.random() * 850 + 200).toFixed(1)
+                        upSpeed = `${simUp} KB/s`
+                        downSpeed = `${simDown} KB/s`
+                        totalUpMb = `${(addedSec * 0.12).toFixed(1)} MB`
+                        totalDownMb = `${(addedSec * 0.85).toFixed(1)} MB`
+                    }
 
                     return {
-                        uploadSpeed: `${upSpeed} KB/s`,
-                        downloadSpeed: `${downSpeed} KB/s`,
-                        totalUpload: `${totalUpMb} MB`,
-                        totalDownload: `${totalDownMb} MB`,
+                        uploadSpeed: upSpeed,
+                        downloadSpeed: downSpeed,
+                        totalUpload: totalUpMb,
+                        totalDownload: totalDownMb,
                         durationSeconds: addedSec,
                         currentPingMs: selectedServer.pingMs || 32
                     }
@@ -87,20 +115,28 @@ export function App() {
     const handleToggleConnection = async () => {
         if (status === "disconnected") {
             setStatus("connecting")
-            const success = await VpnService.connectTunnel(selectedServer)
-            setTimeout(() => {
+            try {
+                const success = await VpnService.connectTunnel(selectedServer)
                 if (success) {
                     setStatus("connected")
                 } else {
                     setStatus("disconnected")
                 }
-            }, 1200)
+            } catch (err: unknown) {
+                console.error("Erro ao ativar VPN:", err)
+                setStatus("disconnected")
+                const msg = typeof err === "string" ? err : (err as Error)?.message || "Permissão de VPN recusada pelo usuário."
+                alert(msg)
+            }
         } else if (status === "connected") {
             setStatus("disconnecting")
-            await VpnService.disconnectTunnel()
-            setTimeout(() => {
+            try {
+                await VpnService.disconnectTunnel()
+            } catch (err) {
+                console.error("Erro ao desconectar VPN:", err)
+            } finally {
                 setStatus("disconnected")
-            }, 600)
+            }
         }
     }
 

@@ -150,25 +150,30 @@ export const VpnService = {
     },
 
     async connectTunnel(server: VpnServer): Promise<boolean> {
-        try {
-            return await invoke<boolean>("start_vpn_tunnel", {
-                serverConfig: {
-                    host: server.host,
-                    port: server.port,
-                    protocol: server.protocol,
-                    uuid: server.uuid
-                }
-            })
-        } catch {
-            return true
-        }
+        return await invoke<boolean>("start_vpn_tunnel", {
+            serverConfig: {
+                host: server.host,
+                port: server.port,
+                protocol: server.protocol,
+                uuid: server.uuid
+            }
+        })
     },
 
     async disconnectTunnel(): Promise<boolean> {
+        return await invoke<boolean>("stop_vpn_tunnel")
+    },
+
+    async getVpnStatus(): Promise<{ isRunning: boolean; bytesUp: number; bytesDown: number }> {
         try {
-            return await invoke<boolean>("stop_vpn_tunnel")
+            const res = await invoke<{ is_running: boolean; bytes_up: number; bytes_down: number }>("get_vpn_status")
+            return {
+                isRunning: res.is_running,
+                bytesUp: res.bytes_up,
+                bytesDown: res.bytes_down
+            }
         } catch {
-            return true
+            return { isRunning: false, bytesUp: 0, bytesDown: 0 }
         }
     }
 }
