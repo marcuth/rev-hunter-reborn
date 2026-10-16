@@ -16,6 +16,10 @@ dist-ssr
 src-tauri/target
 src-tauri/gen/schemas
 target
+.gradle
+.gradle_home
+**/build/
+**/.gradle/
 
 # Editor directories and files
 .vscode/*
