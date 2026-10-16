@@ -25,6 +25,7 @@ import java.net.ServerSocket
 import java.net.Socket
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
+import javax.net.ssl.SSLSocket
 import javax.net.ssl.SSLSocketFactory
 
 class LocalSocks5Forwarder(
@@ -52,41 +53,41 @@ class LocalSocks5Forwarder(
 
     private fun handleClient(client: Socket) {
         try {
-            val `in` = client.getInputStream()
-            val out = client.getOutputStream()
+            val cin = client.getInputStream()
+            val cout = client.getOutputStream()
 
             // 1. SOCKS5 Handshake
-            val ver = `in`.read()
+            val ver = cin.read()
             if (ver != 5) {
                 client.close()
                 return
             }
-            val nmethods = `in`.read()
+            val nmethods = cin.read()
             if (nmethods <= 0) {
                 client.close()
                 return
             }
             val methods = ByteArray(nmethods)
-            `in`.read(methods)
-            out.write(byteArrayOf(5, 0)) // No Authentication Required
-            out.flush()
+            cin.read(methods)
+            cout.write(byteArrayOf(5, 0)) // No Authentication Required
+            cout.flush()
 
             // 2. Request
-            val rVer = `in`.read()
-            val cmd = `in`.read() // 1 = CONNECT
-            `in`.read() // RSV
-            val atyp = `in`.read()
+            val rVer = cin.read()
+            val cmd = cin.read() // 1 = CONNECT
+            cin.read() // RSV
+            val atyp = cin.read()
 
             val targetHost = when (atyp) {
                 1 -> { // IPv4
                     val ip = ByteArray(4)
-                    `in`.read(ip)
+                    cin.read(ip)
                     InetAddress.getByAddress(ip).hostAddress ?: ""
                 }
                 3 -> { // Domain name
-                    val len = `in`.read()
+                    val len = cin.read()
                     val domain = ByteArray(len)
-                    `in`.read(domain)
+                    cin.read(domain)
                     String(domain, Charsets.UTF_8)
                 }
                 else -> {
@@ -95,21 +96,48 @@ class LocalSocks5Forwarder(
                 }
             }
 
-            val p1 = `in`.read()
-            val p2 = `in`.read()
+            val p1 = cin.read()
+            val p2 = cin.read()
             val targetPort = ((p1 and 0xFF) shl 8) or (p2 and 0xFF)
 
-            // 3. Conecta via túnel SSH através do canal direct-tcpip
+            // 3. Conecta via túnel SSH através de canal direct-tcpip
             val channel = session.openChannel("direct-tcpip") as ChannelDirectTCPIP
             channel.setHost(targetHost)
             channel.setPort(targetPort)
-            channel.setInputStream(`in`)
-            channel.setOutputStream(out)
             channel.connect(5000)
 
             // 4. Responde sucesso para o cliente SOCKS5 (tun2proxy)
-            out.write(byteArrayOf(5, 0, 0, 1, 0, 0, 0, 0, 0, 0))
-            out.flush()
+            cout.write(byteArrayOf(5, 0, 0, 1, 0, 0, 0, 0, 0, 0))
+            cout.flush()
+
+            val chin = channel.inputStream
+            val chout = channel.outputStream
+
+            // 5. Bombeamento bidirecional de dados
+            val tClientToChannel = Thread {
+                try {
+                    val buf = ByteArray(16384)
+                    var n: Int
+                    while (cin.read(buf).also { n = it } != -1) {
+                        chout.write(buf, 0, n)
+                        chout.flush()
+                    }
+                } catch (_: Exception) {}
+            }
+
+            val tChannelToClient = Thread {
+                try {
+                    val buf = ByteArray(16384)
+                    var n: Int
+                    while (chin.read(buf).also { n = it } != -1) {
+                        cout.write(buf, 0, n)
+                        cout.flush()
+                    }
+                } catch (_: Exception) {}
+            }
+
+            tClientToChannel.start()
+            tChannelToClient.start()
 
             while (channel.isConnected && !client.isClosed) {
                 Thread.sleep(500)
@@ -132,55 +160,47 @@ class HunterSocketFactory(
 ) : SocketFactory {
 
     override fun createSocket(host: String, port: Int): Socket {
-        val s = if (port == 443 && !isWebSocket) {
+        if (port == 443 && !isWebSocket) {
+            // Porta 443: SSH direto sobre TLS (Stunnel) com SNI
+            val rawSocket = Socket()
+            vpnService.protect(rawSocket)
+            rawSocket.connect(InetSocketAddress(host, port), 10000)
+
             val sslFactory = SSLSocketFactory.getDefault() as SSLSocketFactory
-            val sslSocket = sslFactory.createSocket()
-            vpnService.protect(sslSocket)
-            sslSocket.connect(InetSocketAddress(host, port), 10000)
-            sslSocket
+            val sslSocket = sslFactory.createSocket(rawSocket, host, port, true) as SSLSocket
+            sslSocket.startHandshake()
+            Log.i("HunterSocketFactory", "Túnel TLS estabelecido na porta 443 com SNI ($host)")
+            return sslSocket
         } else {
             val rawSocket = Socket()
             vpnService.protect(rawSocket)
             rawSocket.connect(InetSocketAddress(host, port), 10000)
-            rawSocket
-        }
 
-        if (isWebSocket || port == 80) {
-            val out = s.getOutputStream()
-            val req = "GET / HTTP/1.1\r\nHost: $host\r\nConnection: Upgrade\r\nUpgrade: Websocket\r\n\r\n"
-            out.write(req.toByteArray(Charsets.UTF_8))
-            out.flush()
+            if (isWebSocket || port == 80) {
+                val out = rawSocket.getOutputStream()
+                val req = "GET / HTTP/1.1\r\nHost: $host\r\nConnection: Upgrade\r\nUpgrade: Websocket\r\n\r\n"
+                out.write(req.toByteArray(Charsets.UTF_8))
+                out.flush()
 
-            val `in` = s.getInputStream()
-            val sb = StringBuilder()
-            var bytesRead = 0
-            while (bytesRead < 2048) {
-                val b = `in`.read()
-                if (b == -1) break
-                sb.append(b.toChar())
-                bytesRead++
-                if (sb.endsWith("\r\n\r\n")) {
-                    break
+                val `in` = rawSocket.getInputStream()
+                val sb = StringBuilder()
+                var bytesRead = 0
+                while (bytesRead < 4096) {
+                    val b = `in`.read()
+                    if (b == -1) break
+                    sb.append(b.toChar())
+                    bytesRead++
+                    if (sb.contains("200 REVHUNTER\r\n") && sb.endsWith("\r\n\r\n")) {
+                        break
+                    } else if (sb.contains("101") && sb.endsWith("\r\n\r\n") && !sb.contains("REVHUNTER")) {
+                        break
+                    }
                 }
+                Log.i("HunterSocketFactory", "WebSocket handshake concluído: ${sb.take(80)}")
             }
-            Log.i("HunterSocketFactory", "WebSocket handshake recebido: ${sb.take(50)}")
-        } else if (port == 22) {
-            val `in` = s.getInputStream()
-            val sb = StringBuilder()
-            var bytesRead = 0
-            while (bytesRead < 2048) {
-                val b = `in`.read()
-                if (b == -1) break
-                sb.append(b.toChar())
-                bytesRead++
-                if (sb.endsWith("\r\n\r\n")) {
-                    break
-                }
-            }
-            Log.i("HunterSocketFactory", "Banner HTTP 22 consumido: ${sb.take(50)}")
-        }
 
-        return s
+            return rawSocket
+        }
     }
 
     override fun getInputStream(socket: Socket): InputStream {
@@ -260,12 +280,12 @@ class HunterVpnService : VpnService() {
                 Log.i(TAG, "Iniciando túnel SSH com JSch para $host:$port...")
                 val jsch = JSch()
                 
-                // Tenta carregar chave RSA embarcada
+                // Carrega chave RSA desprotegida (sem necessidade de AES-128-CBC)
                 try {
-                    val rsaKeyBase64 = "LS0tLS1CRUdJTiBSU0EgUFJJVkFURSBLRVktLS0tLQpQcm9jLVR5cGU6IDQsRU5DUllQVEVECkRFSy1JbmZvOiBBRVMtMTI4LUNCQyw1REY3M0FDNzJEQjBFMEJCNDJDNkU1QTU4NkVEM0Q2MwoKZ09HZHg4L2cyOXluQmw3UjdVTWthWnJkaEJtZE5wVCtWaWplbE1PeUxrOXdsZ29Ddm5XWFV5blV2cWt4NHRJRApQcFVvcUZlUjNGM3czeVlpVloySW5PR3dQUGZoK0dZMGJFY0pleGNLQmFwaHcvSmN1dkNkMGJncHBMTGxxRjBqCmNQV2ZvNFVQVmdtdUVaSjZuMVFza2NkNzBqaDkrMWR1TDVtNXFsTVVwdjIzQXU0SHlDSmE5ODNzbHNaRzlYZWEKRmpUNjB3YVlnT3JwYjVNYWlIZFlGYWxhUCtkU2g2ZGdCZjMxT0xwZjAyanIrNG1PRnh1OG5sWDBlK0puTTRmegpoNWNwdDhoVlpYL2F5M24rYmZOaFBjSzJ4TkZVTnRMS2pGL2lzZGJWOWJzaVFoR0lOQmFSeWdySExzZ0puTVFuCkhjYjlFUVdyUHV0N2hxNVByU0sxY3FLVFRSbjd2VXVsakt2alg5T01OMUozRUpWMTRsWjRPV3IrQlNXYnVYalIKbzJDU0dBQmk2S3htRGpFd0hDeGVBazVUTEwvTSt5RlNBamNyVE56aUFVTVg2QXQ3UnJYQm54a2hGRnVLazhjRwpaZmNRMFNIUWZudE5pdnJqWlBzWFJVMEc3ZTVPVnprMyt4MWc0QlVnN3U4eTgwcXpzckpUeGR4aWM4M2pKS2wvCkNxRDlIelM5TGxzVjM3dFBkTldkWUdoTGU4MW5WejJZZVhDbjFPUy9xZ2RORHBnR3A2ZzVHNTVBNHp1REVaYUoKUTM0RzZhK1FPUnlHbTRvZGxzRDlUdEtMdjM4ZXZzQUJrOTVJWG9HMmJZQmVsVEhuZndDOHlndm1rREM1SERDQgorcWlwc2lpcDYvK2NLRTZ1dGxjN0VJbGF0c1BrOWZ6cXNVOUM3M1pzRDZtbVdBalFlOFpINFR5MkVycVg5cDkvCm1hOWtsWXZyQ1RoVkFGL3hTaXFRdmI1aXhNNGJsUktCRjh3ejNLeUpPN1BZYUFkcWVYa1BnTEdzUEJGR3RzQ2QKNUFQQ1ltaEkzcEpLV0ZQbXRJNXAwR1FVUlBtM2wxRm1GQ1hMdGJ3YkJ4ZVdKWVdEdHVzaGRrTHhvdHBQa0xiTQpjR1dPVlhkekFBNUdzaGp3dUI3d2hiZit6TVZYZ0NqY2JRTXNlSWRTRkFsRDZVeXF5ZTF2TVV2K3JRN05TRFJECjNqZ3BycXAzSGpDbVhwc0o4L1BjVEsxVXRNSHlCZWUvM2k3c2kzbVVzSDJXU2ZUTW96R1ArakNpMi9QSHZGSXoKNjk4R2NFaWI5S2FBZGdKRWowSVBBQUVldmpxZm9uSTZDYXBTeFVaQUFWTmZRVVVFVFFHQ200WGU2cDZhVVBkTApJeHUrQ29qdkZUc28xSUVObm1mekY2WmVmSFU5ci9aTFdvYnpXYmN1VDJPOEtrcm9aVlhFNGhFK2poTWRIcWZOCkJOZWFZWHlJdjRPZURTS0p5NEJYQmNadzVOSXozYVdjbVZ6S2d4dVl5MHFPRU5HR0ovTFBZK2xVdzgwRTFLOHcKYlNDSVRXK3lvV2JZamFZenVDc0VtNy9jQkJyWWRXbVd6bGNaUEltVVpuVXJZaStDbllxOVlpeXpqSkEzVkhYdwpWUzl2ZG5WK2VNbXBwU08yYU1ldjZtUnJOTStzeWRpTEhZeGdNb1hpNFZ6MlJkSFZ5VFRUS3c0bmFzMTJnajBxCkZicXpvcVo2MGp0anBDaDB3Q3Y4ZXZHNVd3S1NnSy9OOHpwam5CVFpNZGRtSFZEV3N2Sk9hNUZvblVCd0ZBanoKWmNrTDhTVmRVelJHT1VNbVZLdUU3aHJRb3g2aHNzZW1FMmFPYUtERkw3YUJ1czYxeUQxc3l3My9FRHBldWxYSQpNdkdtR1NTV2c2cVFsZ0RyOUJ6TUt6aHRPckpJbzI3V3pkZVFBVlV6TWdyTDRYRU9OMENyeGZsTzJINThhaW9xCjhiQ2VXazZ0L3E4OW1Wd1FKYnZIandKbnIrNGR5SGlZamc1SDNxV3l1dVFtRnlIbkZjanlZV0tPTGVxdDRLWmcKVVRQYncxSlN6cmQxR0hqSlFzQ1dBMiszOFdkaGJkUi9OQStkZTNiL2dBNTVJeHY1VnpQT1hJakdsZlhaL2I3TQpMdUxiaXlLZnVYblJ3YlRUMnpzcEtIMTVCREVOaXdrRkkwb21YRkRTTkkwaDRMUXBYT0hURDU5OE12c1pEeWJICjZDeE1EWndVYmdZd3dTcEZGdDlCalhGNWZDT1Jlc242WmtwQUthUUM1WkF0ZGtQR25zQy80Tk5KeEk4QmtzazcKV291OEFOOG5aM3ZBc0F2R2VyQ3c4U0Jyd0NlVENLMVB2OTZQNldiVkNYRVN2VXhKUWpabmpRQ3VhcjMwMjJ5SwozV0xsRmk2aXl6Q0REc3Z2T2NpODgvNkFJQ3JjYlJRbzFac215aVFJR3hkRW90eHJKd1RBWVU0UXA5U3Y5TjNCCnU5MmEyaG94ZktFNUNwbmxXOVpUa0JmZG04ZHphdHJrUUFWNG9IMzZiRnlodFZXT09SNlF3TDVWTXNkRjF2ZlIKZzgzQmZsMlZNZ3JUUkxMenY1dmF6b09TbmFmR0lHWXJvZXBPWXByQnIwaGdrdXJXU3dGVXdWWGpsTEtucnFrRApFdkJPckV5TjBUdWMycS9DWUJZdHZLYzhiUGE0N3V1YTdOYTVrekc5Y0VkNjBla2VqSnJ0eU4xTnJwenNJVi83CnZCK3BlVHhWdTUrRWU0ODVuRUR0RDlrcXQvV0x4dG05M2RGRjVZLzJHYVF1N2dzblgzcGpNNUthT1NFUXFHSHgKTVcxNytQRG10VkMraktxbkY1N3lWZXlQbFFPT3I0Z2lkVlVjWlRRRkFiSC9NdlZPdTZzTmVNN2YyZXJTdytqdQpkM0NCQ1ZaMloxNXFJV1FXb2pudy9NWWRZRGdETFYwT2RWRU5TaWg0TE45bUNTR0ZVWTlaTExQa0NuT2NKc3F0CnR1Z0g5d3M5VkM1bHpsRjVqdGN3OTFxbXduc0FJOGtQTWl6RHNqZ3ZjS2N2czlJREU0ZFlaMktkb2crOFZaQzQKVGFDczgzeEp3Z24rc0dUZExHRlRZbVNWaW9RQ0g0bjRuNkxQUGFXR2s0MVBlQzFvUWhlZ3pQVGdGZ2RHVHZzZwo1NlhHZSt5MUROR3Q1VVZ2T1ZDbXplRzhNR3FTMHNEbUJaa0ZKTm1OQXRDa2Q5c05FNCt4VCtBZ2JwclFDNkpsCmtEbll5aUZNUnVxZUNJVEM1Tm13dHBFZnlFYUVlUTJqRFdrUGxsaWtoL2NiOFJud1BxRkhqbEJMaEVCTXBSL28KTGthVllxcTVtTk81bHZ3MDYxeThFNWVwdmFJVCtRTnAzWDlFRDA5bmYzbGJzOUxhR1NGZE5NVVhiNkxKaDdydAoxZCtlRlZmMzV6REtBZWMzd1AwZ0kyMHNxdHlsMURydkRjQlQyR2hPVUhPUFFIQTdPSERqR0RCYS9JSHhKQnFEClNySUhzdUZEY1Y5aE5zU2pzbXVOS1BTSGZoczdiaDFsUW9ucFFBMDZaeUFIT0Fxb1R5V25vQ283cHo2akVwNmsKZjNJTGw0Vkc1dTFub3Q0QzVYSjVnSm1HYTF1REUzT1hEL1NyV1UyeEs2c0JQWUpmbitPV2QvZDRrS2xxYk02NwplNVZkRTZWR3FEMENRdUxoanN1TUdLanpaV2N6RWRlZm5Sc240dnA1Vmt4TDFjam1SZUZnRzZXVENjVFo1KzErCkJwTXppRGZhc0dCak5CbitGSUdVZHZXd3owVkpqTVpuL1BZNVN5Wnd6dzZwaG5FK21mN0k0ZUdqKzE4TjQ2elMKd3Q5ZHlRNWZGUzJuVi9ZZGFmcUszZEQ0MWpJV0hVdFBGU0YwbG9mSDZ3bS90TXJNRzFNYzJqdlNSUW5TYnoxdQp1SWZkcjVoV2N6SS9jcGJIcFp6K2d2SVJEekt0RTdkTjl5OHluUmQvZXlPQ3RzTnljTVVoVVBBWWZhVnpFcERoCnpzTFgyUUlNUGJUOTNwWlV5cVlIMm82N0Rram8wR0xVanR3M2pGaGl1ekF1cmVsbkcvVENQdFQrb1Y5ZzkvT1IKb3pKcEJqbWk3NklQK21vNE5pbXRJbXhhck0xUFdtc1RBKzA1SWlBR0pka04xNkdTN3cyUTJJbmJaSGt4N21UOAotLS0tLUVORCBSU0EgUFJJVkFURSBLRVktLS0tLQ=="
+                    val rsaKeyBase64 = "LS0tLS1CRUdJTiBSU0EgUFJJVkFURSBLRVktLS0tLQ0KTUlJSktBSUJBQUtDQWdFQTB5UDljWFV2RjhqaHFSWFN4NXhhSFZZdDgzSWZVMWt5d0UzcHBhZUs3TDRVV1M1bA0KVm1TZTdhWTg4dTNldnhhamFxcVdYYmpUYmwrbkREc1hTTC9mVStHR3M2RHplc0hEZVV6TGRGT2huT3U5VC9zMQ0KaktMSnhJWUt1V240dmhoT0owZVBkWDc4SzdwL2x2bjd2WUJFL2ZPSWJsQ2p0eXVpdUdsbzdIdU1LRDI3N3MxWg0KbW1sWGd3VmF2OTAvR05WRnExV3V2SlF3cmdUTklXbU8yZ1lveHZJdjBvbUhvT0FWcWFDZVpKQ1FGcG5MSGs2Yg0KSkw4eFhCZWNBWXpSaURqclE4MDdiUlJSV0ozL0h4c0hIT1ZvQ280ZU5YY0xDdXBDcTF3UVdWa1hFZU9na0lHUQ0KQWM3NkY2SXFwTEFLTC9DVHZtajJnWk9yaDFhSUN3MlFVeTFMVVF0NzZIZ0gzMG1tcHZ6UHJKeVZNTjhvMmdjaw0KWmhnaUpXaEdZclhXbDF1eURlNTdWTkIxY1luOGY2UUpUQ3UyRU8zRnNBbGFFSXg5WWlrZjdPMFEyMWhrRXhYNQ0KM1BVTCs3NXk4eUpwSW85K0R6SnlDSThqblJBMXhpVWZDTTRVWDhJSFRZT0pjb2JkVm41bG8xSWNKSUl0SmdJRA0KQzUzQnhkL01ZRWR3VVFXaEY1dzlhWnVrRGtmeGNHT3NYMnpoYVcwS0RZbCtzU0UzVENaWFM2Uzd1UjZzZmd5eg0KbHcvOWJzN3lEVWpqQjExYVR1cG5odWRQaUJWSzVFOXpzallabC9DMW13a1ZlVmk5UWVpVWlLblgxeEora1JLTg0KQldhWnIyYzVFR1JuMzBOT0kvT09wSXoyeUZGcmNJUW12T1BtSXkyTnIwVEVqWGtRWHB2Rjc0TjZkVmtDQXdFQQ0KQVFLQ0FnQldoYUVPSlY4dTkvckJOMWd3eERtSlhBOW9lNU9xckJySUF5V0Q1S3hoWjJNZlNJdnVZejFkVllvVQ0KWXJXc3lMSWV1OWp5ZnhMbFgvMHNYZXFrdlR2Zk84UGZTRTErT0hqSjlGWkxUUm9sRzlWd09Sa3drR1R1UzUrSg0KYTR1ckducXNUZjdUdnozSERaM0xXSlY0aWwrN1VWalBHK3g2Mno3TEl5Y0VBWHpsNEtacXJXdlNndWlCb0dnWA0KeDZwYm1zbjU5QnF1M0dzMlpIRkxCOTZxS1d2OFdyS09MQjJRSjBPNVIwQ2hKVHhtaG85ZDFBaHZmb25UbXprcQ0KeVhIenlKOWdJWElBdVJxOG5jSTJGUFZOT2hUd2ZseVN2RDJpTTIwdW00TjNtYktDZWkwS0NvM2dyOWg4WnMvaQ0Kdk9EdjFENDNBUHhERFNoMVJWaHFieHg5ZVVvckpXTjYvbXJIUkp3eHZVRjVlR1RHUG9VU2ZxNjhoaWpxOTY3cg0KMGQ5dGVrdTdML2wvL3V5UlNZWjlqWE45VDhVeW5TZDJpeXhYVGxmSWhqV2ViK0pVMGxrSEJQTXRjTG9jR3g0bg0KQnRpRDluUEtYcFgxQmh4MlpsRy8rMVhuSkhhUDQ1R1pYL0RQRFZIQWFyZllMeUhGWk9lYlFRcWVsVURLcnYzOA0KYXFqR2RGaUh1YmQwVDlqd2tOUnUwOXF6MmhUdy9xVnR3VXNzVUdSQVpzWlZnbzBNR3BRR1gvZHR2SlhZcjNVUw0Kc2pIS1VWVWJkT3Q5aGh0a2FkM3BVMWt1dGx0Yml2c0tkRENidzU0OEZHZjJlUEFpeEFRdDZCenYwbUZGMUMzNw0KMXR2ak0xcVE5MDJsNTZLc1UwQXdQUTNieGMvNUNmTDN3QnQ1Q3JsbmZsZWQ4L0NPZ1FLQ0FRRUE2dXR6SHYzcw0KN2R2RXk5SjNyejVkNWM0SnZnbTBEN2dUNUdUMWNGdVJNSVlUc3FhWTRhMDdQMndySWVreUM5b3QwTythK0R3Lw0KSGhqVTNvVHc2c00wVzdiRU9sMUVlc2l3NUE2bGlUSkxUNEpRbnF2QjdseVdlK0hQMXdJU2FPMFg2MElBMlc3bA0KdlBwcnBPZ3lueFFyYlZwdThra1RqSHpWK1o3dTVMa2Y5ZzZsZ3dHS00xRWtUb1ZDZFNqR04xVmwwMkh3RG9FcQ0KRGpjRk5FS2syMXh3SGkyUGRwU2ZRRHljR2xWN2hidjBvc0owcU9pSHpKeCtXeHJjV2IwNlg3aXc2Zkh4SStGRw0KcFBQNXAyQUY3a0c2SGNUb3BYeDNXM21VOGVzeVRwdzU2WkppRkRxNmxKNHBjWkVhL2ptVTRsWkcrR3VrZWFFNw0KSzYrRGZCT2JMaFNBVlFLQ0FRRUE1aFpKM01JMW45dkFuNitXY2FvY2lEdFBKTjZtUGd4cGd3WVM1YjYvZGVURw0KcGNra29iZXBkYnB2QWpyWHJCTVRYS1VXeTdHVlkrQzJMMllYeW5tSVNWWmNPTzVsOVFzZXVjN1EzanVLeGI1Rg0KcjB6OWlKYmRFWGVEeXVSdVowK0E3N0ZzMUxZZ2hQRGs3MStyOWtYR2lOZEtBV2o4YWxoaU5uaXRlS0RwM042cQ0KV3lFTWFCOE40QTZkQ2FYRDNreXdyRWRnbWFNdkhUYmU1bXpYZ2VUQUh4TUVXN3BVSDFVL2pWd2NRVDNVMm5tSQ0KUWpGRUJ0MElUZlJkMEtDUDhJUDJtVmpHQ3NVcWdKa0RjYjVJVDJPRXRFdjYwaFNGVzBOQnJlMk5nb3IxZ1dpLw0KTDMwZXhGVVRNRU03aTVaeFFXNVJQd0ltWHFybDlMNFpXbXlXa1lFVTlRS0NBUUFzTmkrdVQzKzlyRFMzWDE3aQ0KL2t2UnFoc3ZSc2c2aFJ4SlNhN2ZmSHd3czZzVlhrRTdoOHkwdlBqSkl3Z21MdU9jaE51WGlFOGdyTyt6Q1RZRw0KR01MTDEvUEtRQzlaSkZnV002TjMxSjFUMDJTMDJBSmhoODlTZFVjV1llOXhDOTRLaXB0NlVHS3dWRGphQ2xFcw0KbXpFcEhYSHY2MHpnamNYL2VxZmZKL0FaOE51NWNocStXYkVKamc3WjJkaWtKVkJLbmczOXpOVkxZNU41S0dtNg0KVndWS3lLeE5WdDg1eWE1ZlRtTTI0ZzdDYXZKbHI0MlBOb3laUE03bm5MTlZ2SDZmS01lSFJ5aHlkdkF2VGVVUA0KMkJMYzgyZ05iUVZSaytveU5WOThaKzZHUk9Sc2hqa0RLMWtGWkplOTdMeFdkSUphMG5kYjVMb3NHSllZVGVCUQ0KcGM4WkFvSUJBUURRUU9BOTFmS2ZiRkdldDFqZUxIQ0N4ZHZPclUrZTNiRXFqSGJTUjZJWDNTZ0hxbFZqb2s3Wg0KWmhOUDIxNldPdlhOWndlSStvVVN6N05XbDN0MUlpYys2ZEd6SGVSZXROL3NvY3JmT3RsU1BmUG94VEM5VG45dA0KYmRWMThPZ1V6aHNQMkhGKzNoSDFBZXpVMUsxYXpMRHo3cGpuU2RVZGxEM2d1NzJYYjEzOU1mVFRZc2hOL2IyYg0KVE43S2VxVWNNaUcrN1NQOEszMWJYZXpHZDBGZ0ttSFNQbTQxY0NMdjhVTUNlWnFCV3F1cnkxQ1BTUFFmbWpRSQ0KQ3VSWER0ejVmeGZXbUVrNE9sbEw2REw3NHBTa2Rwa0liN1RvTFBhL01kTGkwQjdEUjI4SzRIb2JTNDVyZWUxUw0KUTZoRG9ibUUxWXJvRXRRVDMyOGY1R2dpTmlMYU5CRjVBb0lCQUhCZCtnZEd1aG5DZXJvREErdXZTR0ZLTkZ6Wg0KTnVJd2NTdXdYa2lWMFloZzlKRndGekRhcCtQYW8zczZoN2k1WjcyOVR5d2ltamtROEVON2k5NzdwQlpKZ0VNVg0KN2ZDMFFmM1RhT3NHalFmRHp4d2tObk1QSTJpdE9QQU1xM3cxQkJoT2VhY25vNHFxQkMvU3JsQTFrK2pobEgyVQ0KeTI0bFZCN29MMnZQUmZoNER0V2xyL3BKVG52b3c5c0pSemxpd2w1ZlRCbDBBTFVmaEFOckh0a2Y1TUU4UGdWQg0KVkNsbWJsayszZldCWG5BMFRxSnJqUU03aWJZSjFaWDVrUWh6VUk4VEhqWTQ4cTFvdWNDMTczWTRwL1RBa3U5cA0KQTM3eGpLOGFqcSs5aTdlekI1T0ZzYkF1ekZIYWExa09ZWllEOThyZlBGOXFRU0Y2NElzZkkwMHlYUGM9DQotLS0tLUVORCBSU0EgUFJJVkFURSBLRVktLS0tLQ0K"
                     val rsaKeyBytes = android.util.Base64.decode(rsaKeyBase64, android.util.Base64.DEFAULT)
-                    val rsaPass = " ".repeat(64).toByteArray(Charsets.UTF_8)
-                    jsch.addIdentity("revhunter", rsaKeyBytes, null, rsaPass)
+                    jsch.addIdentity("revhunter", rsaKeyBytes, null, null)
+                    Log.i(TAG, "Chave RSA privada carregada com sucesso no JSch!")
                 } catch (e: Exception) {
                     Log.w(TAG, "Aviso ao carregar chave RSA no JSch: ${e.message}")
                 }
@@ -274,23 +294,26 @@ class HunterVpnService : VpnService() {
                 session.setPassword("ueuf49gpv")
                 session.setConfig("StrictHostKeyChecking", "no")
                 session.setConfig("PreferredAuthentications", "publickey,password,keyboard-interactive")
-                session.timeout = 10000
+                session.timeout = 15000
 
                 val isWs = (port == 80)
                 session.setSocketFactory(HunterSocketFactory(this, isWs))
 
                 try {
-                    session.connect(10000)
+                    session.connect(15000)
                     sshSession = session
                     val forwarder = LocalSocks5Forwarder(session, 1080)
                     forwarder.start()
                     socksForwarder = forwarder
                     Log.i(TAG, "Sessão SSH conectada! SOCKS5 dinâmico ativo em 127.0.0.1:1080")
                 } catch (e: Exception) {
-                    Log.w(TAG, "Aviso de conexão inicial SSH: ${e.message}. Prosseguindo com criação de interface TUN...")
+                    Log.e(TAG, "Falha na conexão inicial SSH: ${e.message}", e)
+                    updateNotification("Falha na conexão SSH", e.message ?: "Erro desconhecido")
+                    disconnect()
+                    return@Thread // Aborta para NÃO prender o tráfego da rede
                 }
 
-                // 2. Estabelece a interface TUN do Android
+                // 2. Estabelece a interface TUN do Android apenas após SSH confirmado
                 val builder = Builder().apply {
                     setSession("Rev Hunter VPN ($protocol)")
                     addAddress("10.0.0.2", 24)
