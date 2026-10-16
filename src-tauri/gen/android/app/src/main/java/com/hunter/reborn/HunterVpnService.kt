@@ -31,6 +31,8 @@ import javax.net.ssl.SSLSocketFactory
 import javax.net.ssl.TrustManager
 import javax.net.ssl.X509TrustManager
 import java.security.cert.X509Certificate
+import java.security.Security
+import org.bouncycastle.jce.provider.BouncyCastleProvider
 
 class LocalSocks5Forwarder(
     private val session: Session,
@@ -236,6 +238,16 @@ class HunterVpnService : VpnService() {
         private const val CHANNEL_ID = "HunterVpnChannel"
         private const val NOTIFICATION_ID = 2001
 
+        init {
+            try {
+                Security.removeProvider("BC")
+                Security.insertProviderAt(BouncyCastleProvider(), 1)
+                Log.i(TAG, "BouncyCastleProvider registrado com sucesso na posição 1")
+            } catch (e: Throwable) {
+                Log.w(TAG, "Erro ao registrar BouncyCastleProvider: ${e.message}")
+            }
+        }
+
         @Volatile
         var isRunning: Boolean = false
             private set
@@ -308,6 +320,7 @@ class HunterVpnService : VpnService() {
                 val session = jsch.getSession("gp45ndonr", host, port)
                 session.setPassword("ueuf49gpv")
                 session.setConfig("StrictHostKeyChecking", "no")
+                session.setConfig("server_host_key", "ssh-ed25519,ecdsa-sha2-nistp256,ecdsa-sha2-nistp384,ecdsa-sha2-nistp521,rsa-sha2-512,rsa-sha2-256")
                 session.setConfig("PreferredAuthentications", "publickey,password,keyboard-interactive")
                 session.timeout = 15000
 

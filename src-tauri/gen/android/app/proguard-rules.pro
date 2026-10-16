@@ -4,4 +4,8 @@
 -dontwarn com.jcraft.jsch.**
 
 -keep class com.hunter.reborn.** { *; }
--dontwarn com.hunter.reborn.**
+-dontwarn com.hunter.reborn.**
+
+-keep class org.bouncycastle.** { *; }
+-dontwarn org.bouncycastle.**
+
