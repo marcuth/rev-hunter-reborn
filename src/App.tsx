@@ -91,14 +91,16 @@ export function App() {
     // Testa ping dos servidores na inicialização
     const handlePingAll = React.useCallback(async () => {
         setIsPinging(true)
-        try {
-            const updated = await VpnService.pingAll(servers)
-            setServers(updated)
-            const current = updated.find((s) => s.id === selectedServer.id)
-            if (current) setSelectedServer(current)
-        } finally {
-            setIsPinging(false)
-        }
+        // Garante ao menos um ciclo de render com isPinging=true visível
+        // mesmo quando os pings retornam erro de DNS instantaneamente
+        const [updated] = await Promise.all([
+            VpnService.pingAll(servers),
+            new Promise((resolve) => setTimeout(resolve, 500))
+        ])
+        setServers(updated as typeof servers)
+        const current = (updated as typeof servers).find((s) => s.id === selectedServer.id)
+        if (current) setSelectedServer(current)
+        setIsPinging(false)
     }, [servers, selectedServer])
 
     React.useEffect(() => {

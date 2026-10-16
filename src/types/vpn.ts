@@ -1,4 +1,4 @@
-export type VpnProtocol = "vless" | "vmess" | "trojan" | "socks5"
+export type VpnProtocol = "vless" | "vmess" | "trojan" | "socks5" | "ssh"
 
 export type VpnConnectionStatus = "disconnected" | "connecting" | "connected" | "disconnecting"
 
@@ -16,6 +16,8 @@ export interface VpnServer {
     isOnline: boolean
     countryCode?: string
     flag?: string
+    user?: string
+    pass?: string
 }
 
 export interface VpnStats {

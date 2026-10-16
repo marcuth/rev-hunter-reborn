@@ -32,5 +32,5 @@ tokio-util = "0.7"
 codegen-units = 1
 lto = true
 opt-level = 3
-panic = "abort"
+panic = "unwind"
 strip = true

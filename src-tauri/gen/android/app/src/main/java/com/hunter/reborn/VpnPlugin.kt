@@ -4,7 +4,8 @@ import android.app.Activity
 import android.content.Intent
 import android.net.VpnService
 import androidx.activity.result.ActivityResult
-import app.tauri.annotation.ActivityCallback
+import androidx.activity.result.ActivityResultLauncher
+import androidx.activity.result.contract.ActivityResultContracts
 import app.tauri.annotation.Command
 import app.tauri.annotation.InvokeArg
 import app.tauri.annotation.TauriPlugin
@@ -28,6 +29,15 @@ class VpnPlugin(private val activity: Activity) : Plugin(activity) {
     private var pendingPort: Int = 443
     private var pendingProtocol: String = "vless"
 
+    // Launcher AndroidX correto para receber o resultado do diálogo de permissão VPN
+    private val vpnPermissionLauncher: ActivityResultLauncher<Intent> =
+        (activity as androidx.activity.ComponentActivity).activityResultRegistry.register(
+            "vpn_permission_launcher",
+            ActivityResultContracts.StartActivityForResult()
+        ) { result: ActivityResult ->
+            handlePermissionResult(result)
+        }
+
     @Command
     fun startVpn(invoke: Invoke) {
         val args = try {
@@ -35,6 +45,7 @@ class VpnPlugin(private val activity: Activity) : Plugin(activity) {
         } catch (_: Exception) {
             StartVpnArgs()
         }
+
         val host = args.host
         val port = args.port
         val protocol = args.protocol
@@ -45,37 +56,23 @@ class VpnPlugin(private val activity: Activity) : Plugin(activity) {
 
         val prepareIntent = VpnService.prepare(activity)
         if (prepareIntent != null) {
-            // Solicita a permissão do sistema Android exibindo o diálogo nativo do sistema operacional
+            // Abre o diálogo nativo do Android para solicitar permissão de VPN
             pendingInvoke = invoke
-            if (activity is WryActivity) {
-                activity.launchActivityForResult(prepareIntent) { result ->
-                    handlePermissionResult(result)
-                }
-            } else {
-                startActivityForResult(invoke, prepareIntent, "onVpnPrepared")
+            activity.runOnUiThread {
+                vpnPermissionLauncher.launch(prepareIntent)
             }
         } else {
-            // Permissão já concedida pelo usuário previamente
+            // Permissão já concedida anteriormente — inicia o serviço diretamente
             launchVpnService(host, port, protocol)
             resolveVpnStarted(invoke)
         }
     }
 
-    @ActivityCallback
-    fun onVpnPrepared(invoke: Invoke, result: ActivityResult) {
-        if (result.resultCode == Activity.RESULT_OK) {
-            launchVpnService(pendingHost, pendingPort, pendingProtocol)
-            resolveVpnStarted(invoke)
-        } else {
-            invoke.reject("Permissão de VPN recusada pelo usuário.")
-        }
-    }
-
-    private fun handlePermissionResult(result: ActivityResult?) {
+    private fun handlePermissionResult(result: ActivityResult) {
         val currentInvoke = pendingInvoke ?: return
         pendingInvoke = null
 
-        if (result?.resultCode == Activity.RESULT_OK) {
+        if (result.resultCode == Activity.RESULT_OK) {
             launchVpnService(pendingHost, pendingPort, pendingProtocol)
             resolveVpnStarted(currentInvoke)
         } else {
@@ -84,17 +81,21 @@ class VpnPlugin(private val activity: Activity) : Plugin(activity) {
     }
 
     private fun resolveVpnStarted(invoke: Invoke) {
-        var waited = 0
-        while (HunterVpnService.lastFd <= 0 && waited < 1500) {
-            Thread.sleep(50)
-            waited += 50
-        }
-        val res = JSObject()
-        val fd = HunterVpnService.lastFd
-        res.put("success", fd > 0)
-        res.put("status", if (fd > 0) "connected" else "failed")
-        res.put("fd", fd)
-        invoke.resolve(res)
+        // Aguarda o HunterVpnService estabelecer a interface TUN em background
+        // para obter o file descriptor antes de responder ao Rust/tun2proxy
+        Thread {
+            var waited = 0
+            while (HunterVpnService.lastFd <= 0 && waited < 10000) {
+                Thread.sleep(50)
+                waited += 50
+            }
+            val res = JSObject()
+            val fd = HunterVpnService.lastFd
+            res.put("success", fd > 0)
+            res.put("status", if (fd > 0) "connected" else "failed")
+            res.put("fd", fd)
+            invoke.resolve(res)
+        }.start()
     }
 
     @Command

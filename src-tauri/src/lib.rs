@@ -35,27 +35,31 @@ pub struct VpnEngineState {
 pub struct VpnHandle<R: Runtime>(pub PluginHandle<R>);
 
 #[tauri::command]
-fn ping_tcp(host: String, port: u16) -> Result<u64, String> {
-    let target = format!("{}:{}", host, port);
-    let start = Instant::now();
-    let timeout = Duration::from_millis(1500);
+async fn ping_tcp(host: String, port: u16) -> Result<u64, String> {
+    tokio::task::spawn_blocking(move || {
+        let target = format!("{}:{}", host, port);
+        let start = Instant::now();
+        let timeout = Duration::from_millis(1500);
 
-    let mut addrs = match target.to_socket_addrs() {
-        Ok(a) => a,
-        Err(_) => return Err(format!("Falha ao resolver DNS: {}", host)),
-    };
+        let mut addrs = match target.to_socket_addrs() {
+            Ok(a) => a,
+            Err(e) => return Err(format!("Falha ao resolver DNS: {}", e)),
+        };
 
-    if let Some(addr) = addrs.next() {
-        match TcpStream::connect_timeout(&addr, timeout) {
-            Ok(_) => {
-                let duration = start.elapsed().as_millis() as u64;
-                Ok(duration)
+        if let Some(addr) = addrs.next() {
+            match TcpStream::connect_timeout(&addr, timeout) {
+                Ok(_) => {
+                    let duration = start.elapsed().as_millis() as u64;
+                    Ok(duration)
+                }
+                Err(e) => Err(format!("Timeout ou erro de conexão: {}", e)),
             }
-            Err(e) => Err(format!("Timeout ou erro de conexão: {}", e)),
+        } else {
+            Err("Endereço IP não encontrado".into())
         }
-    } else {
-        Err("Endereço IP não encontrado".into())
-    }
+    })
+    .await
+    .map_err(|e| format!("Erro interno de execução: {}", e))?
 }
 
 #[tauri::command]
@@ -95,7 +99,8 @@ async fn start_vpn_tunnel<R: Runtime>(app: AppHandle<R>, server_config: ServerCo
             if let Some(fd) = tun_fd {
                 if fd > 0 {
                     let mut proxy_args = Args::default();
-                    let proxy_url = format!("socks5://{}:{}", server_config.host, server_config.port);
+                    // Conecta diretamente no forwarder SOCKS5 local na porta 1080 aberto pelo serviço SSH
+                    let proxy_url = "socks5://127.0.0.1:1080".to_string();
                     if let Ok(proxy_params) = tun2proxy::ProxyParameters::from_str(&proxy_url) {
                         proxy_args.proxy = proxy_params;
                     }
@@ -104,16 +109,17 @@ async fn start_vpn_tunnel<R: Runtime>(app: AppHandle<R>, server_config: ServerCo
 
                     let token = cancel_token.clone();
                     tokio::spawn(async move {
-                        println!("[Rev Hunter Core] tun2proxy rodando no FD {}...", fd);
+                        println!("[Rev Hunter Core] tun2proxy rodando no FD {} direcionado para 127.0.0.1:1080...", fd);
                         if let Err(e) = general_run_async(proxy_args, 1500, false, token).await {
-                            eprintln!("[Rev Hunter Core] tun2proxy erro: {:?}", e);
+                            eprintln!("[Rev Hunter Core] tun2proxy aviso/erro: {:?}", e);
                         }
-                        println!("[Rev Hunter Core] tun2proxy finalizado.");
+                        println!("[Rev Hunter Core] tun2proxy finalizado com segurança.");
                     });
+                    return Ok(true);
                 }
             }
 
-            return Ok(true);
+            return Err("A interface VPN TUN não retornou um descritor válido.".into());
         }
     }
 
